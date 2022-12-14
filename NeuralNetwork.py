@@ -1,6 +1,22 @@
+import math
+
 import torch
 from torch import nn
 
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+class SinusoidalPosEmb(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, t):
+        half_dim = self.dim // 2
+        emb = math.log(10_000) / (half_dim - 1)
+        emb = torch.exp(torch.range(half_dim, device=device) * -emb)
+        emb = t[:, None] * emb[None, :]
+        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
+        return emb
 
 def sinusoidalEmbedding(n, d):
     # Returns the standard positional embedding
@@ -20,7 +36,7 @@ class NeuralNetwork(nn.Module):
 
         self.activation = nn.ReLU()
 
-        self.timeEmb = self.timeEmbed(timeEmdedding, 1)
+        self.timeEmb = self.timeEmbed(timeEmdedding, 2)
 
         self.layer_1 = nn.Linear(input_dim, hidden_dim)
         self.layer_2 = nn.Linear(hidden_dim, hidden_dim)
@@ -52,18 +68,17 @@ class NeuralNetwork(nn.Module):
         out = self.activation(out)
         return out
 
-    """
-    def forward(self, x, t):
+"""    def forward(self, x, t):
         n = len(x)
         t = self.time_embed(t)
 
-        out = self.layer_1(x + self.timeEmb(t, self.dimensionality))
+        out = self.layer_1(x)
         out = self.activation(out)
-        out = self.layer_2(out + self.timeEmb(t, self.dimensionality))
+        out = self.layer_2(out)
         out = self.activation(out)
-        out = self.layer_3(out + self.timeEmb(t, self.dimensionality))
+        out = self.layer_3(out)
         out = self.activation(out)
-        out = self.layer_4(out + self.timeEmb(t, self.dimensionality))
+        out = self.layer_4(out)
         out = self.activation(out)
         return out
-    """
+"""

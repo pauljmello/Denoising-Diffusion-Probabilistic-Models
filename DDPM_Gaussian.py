@@ -10,7 +10,7 @@ import torch
 import torch.utils.data
 import torch.nn.functional as F
 from torch import optim, nn
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 from torch.distributions.multivariate_normal import MultivariateNormal
 
 #  Misc. Libraries
@@ -35,11 +35,10 @@ print("Device Info: " + torch.cuda.get_device_name(0))
 print("Device: " + str(device))
 
 # Set Seed for Reproducibility
-"""
-SEED = 0
+
+SEED = 1001
 np.random.seed(SEED)
 torch.manual_seed(SEED)
-"""
 
 """
 Algorithm 1 Training                                                            
@@ -63,10 +62,11 @@ Algorithm 2 Sampling
 
 
 def main():
-    epochs = 50
-    lr = 0.0002
-
+    epochs = 500
+    lr = 2e-4
     batchSize = 250
+    schedule = "linear"     # "linear", "cosine" https://arxiv.org/abs/2102.09672
+
     sampleSize = 5_000
 
     dimensionality = 2
@@ -75,12 +75,12 @@ def main():
     steps = 1_000
     t_steps = 1_000
 
-    DDPM = Gaussian_DDPM(steps, t_steps, epochs, batchSize, lr, sampleCount, sampleSize, dimensionality)
+    DDPM = DDPM_Gaussian(steps, t_steps, epochs, batchSize, lr, sampleCount, sampleSize, dimensionality, schedule)
     DDPM.run()
 
 
-class Gaussian_DDPM:
-    def __init__(self, steps, t_steps, epochs, batchSize, lr, sampleCount, sampleSize, dimensionality):
+class DDPM_Gaussian:
+    def __init__(self, steps, t_steps, epochs, batchSize, lr, sampleCount, sampleSize, dimensionality, schedule):
         super().__init__()
 
         self.lr = lr
@@ -88,16 +88,15 @@ class Gaussian_DDPM:
         self.epochs = epochs
         self.t_steps = t_steps
         self.batchSize = batchSize
-        self.sampleCount = sampleCount
         self.sampleSize = sampleSize
-
-        self.loss = float
+        self.sampleCount = sampleCount - 1
         self.dimensionality = dimensionality
 
+        self.loss = float
         self.epochCounter = 0
         self.imageSeries = int(self.t_steps / (self.sampleCount))
 
-        self.Beta = torch.linspace(0.0001, 0.02, self.steps)  # Linearized Variance Schedule
+        self.Beta = self.getSchedule(schedule)  # Schedule
         self.Sqrd_Sigma = self.Beta  # Sigma^2
         self.Alpha = 1.0 - self.Beta  # Alpha
 
@@ -107,29 +106,34 @@ class Gaussian_DDPM:
         self.Sqrd_1_Minus_Alpha_Cumprod = torch.sqrt(1.0 - self.Alpha_Cumprod)
         self.Log_one_minus_Alpha_Cumprod = torch.log(1.0 - self.Alpha_Cumprod)
 
+        self.Sqrd_Recipricol_Alpha_Cumprod = torch.sqrt(1 / self.Alpha_Cumprod)
+        self.Sqrd_Recipricol_Alpha_Cumprod_Minus_1 = torch.sqrt(1 / self.Alpha_Cumprod-1)
+
         # q(x_{t - 1} | x_t, x_0)
         self.Posterior_Variance = self.Beta * (1.0 - self.Alpha_Cumprod_Previous) / (1.0 - self.Alpha_Cumprod)
-        self.Posterior_Log_Clamp = torch.log(self.Posterior_Variance.clamp(min=1e-20))
+        self.Posterior_Log_Clamp = np.log(np.maximum(self.Posterior_Variance, 1e-20))
         self.Posterior1 = (self.Beta * torch.sqrt(self.Alpha_Cumprod_Previous) / (1.0 - self.Alpha_Cumprod))
         self.Posterior2 = ((1.0 - self.Alpha_Cumprod_Previous) * torch.sqrt(self.Alpha) / (1.0 - self.Alpha_Cumprod))
 
+    def getSchedule(self, schedule):
+        if schedule == "linear":
+            return torch.linspace(1e-4, 2e-2, self.steps)
+        elif schedule == "cosine":
+            return self.getCosineBeta()
+
+    def getCosineBeta(self):
+        x = torch.linspace(0, self.t_steps, self.steps + 1)
+        y = torch.cos(((x / self.t_steps) + 0.01) / (1 + 0.01) * torch.pi * 0.5) ** 2
+        z = y / y[0]
+        return torch.clip((1 - (z[1:] / z[:-1])), 0.0001, 0.9999)
+
     def getModel(self):
-        model = NeuralNetwork(self.dimensionality, self.batchSize*2, self.dimensionality, self.t_steps).to(device)
+        model = NeuralNetwork(self.dimensionality, self.batchSize, self.dimensionality, self.t_steps, 128).to(device)
         model = nn.DataParallel(model)  # Parallelize Data when Multi-GPU Applicable (Untested)
-        self.optimizer = optim.Adam(model.parameters(), lr=self.lr, eps=0.00000001)
+        self.optimizer = optim.Adam(model.parameters(), lr=self.lr, eps=1e-8)
         return model
 
-    def getMultiGauss(self, mean, covariance):
-        sampler = MultivariateNormal(mean, covariance)
-        return sampler.sample((self.sampleSize,))
-
-        #X, Y = np.random.multivariate_normal(mean, covariance, self.sampleSize).T
-        #plt.scatter(X, Y, c='r')
-        #return X, Y
-
     def getDataset(self):
-        #normalize = torchvision.transforms.Compose([torchvision.transforms.Lambda(lambda t: (t * 2) - 1)]) #[-1,1]
-
         mean = np.zeros((1, self.dimensionality))
         covariance = np.diag(np.ones(self.dimensionality))
 
@@ -141,78 +145,95 @@ class Gaussian_DDPM:
         #return normalize(self.getMultiGauss(meanTensor, covTensor))
         return (self.getMultiGauss(meanTensor, covTensor))
 
+    def getMultiGauss(self, mean, covariance):
+        sampler = MultivariateNormal(mean, covariance)
+        return sampler.sample((self.sampleSize,))
+
     def getExtract(self, tensor: torch.Tensor, t: torch.Tensor, X):
         out = tensor.gather(-1, t.cpu()).float()
         return out.reshape(t.shape[0], *((1,) * (len(X) - 1))).to(t.device)
 
-    def QMeanVar(self, X, t):
-        mean = self.getExtract(self.Sqrd_Alpha_Cumprod, t, X.shape) * X
-        variance = self.getExtract(self.Sqrd_1_Minus_Alpha_Cumprod, t, X.shape)
-        logVar = self.getExtract(self.Log_one_minus_Alpha_Cumprod, t, X.shape)
+    def q_mean_var(self, X0, t):
+        X0_shape = X0.shape
+        mean = self.getExtract(self.Sqrd_Alpha_Cumprod, t, X0_shape) * X0
+        variance = self.getExtract(1.0 - self.Alpha_Cumprod, t, X0_shape)
+        logVar = self.getExtract(self.Log_one_minus_Alpha_Cumprod, t, X0_shape)
         return mean, variance, logVar
 
-    def QPosteriorMeanVar(self, X0, XT, t):  # q(x_{t-1} | x_t, x_0)
-        pmean = (self.getExtract(self.Posterior1, t, XT.shape) * X0 + self.getExtract(self.Posterior2, t, XT.shape) * XT)
-        pvar = self.getExtract(self.Posterior_Variance, t, XT.shape)
-        plog = self.getExtract(self.Posterior_Log_Clamp, t, XT.shape)
-        return pmean, pvar, plog
+    def q_posterior_mean_variance(self, X0, XT, t):  # q(x_{t-1} | x_t, x_0)
+        XT_shape = XT.shape
+        posterior_mean = self.getExtract(self.Posterior1, t, XT_shape) * X0 + self.getExtract(self.Posterior2, t, XT_shape) * XT
+        posterior_var = self.getExtract(self.Posterior_Variance, t, XT_shape)
+        posterior_log = self.getExtract(self.Posterior_Log_Clamp, t, XT_shape)
+        return posterior_mean, posterior_var, posterior_log
 
-    def predictX0fromXT(self, XT, t, epsilon):
-        return (self.getExtract(np.sqrt(1.0 / self.Alpha_Cumprod), t, XT.shape) * XT - self.getExtract(np.sqrt(1.0 / self.Alpha_Cumprod - 1), t, XT.shape) * epsilon)
-
-    # compute predicted mean and variance of p(x_{t-1} | x_t)
-    def PMeanVar(self, model, XT, t):
-        X0 = self.predictX0fromXT(XT.float(), t, model(XT.float(), t))
-        modelMean, pvar, plog = self.QPosteriorMeanVar(X0, XT, t)
-        return modelMean, pvar, plog
-
-    def QSample(self, data, idx, t):  # Sample from Q(Xt | X0)
+    def q_sample(self, data, idx, t):  # Sample from Q(Xt | X0)
         epsilon = torch.randn_like(data)  #  ∼ N (0, I)
 
         # Mean, Variance LogVar from Q(Xt | X0)
-        mean, variance, logVariance = self.QMeanVar(data, t)
-
-        XT = mean * data + variance.sqrt() * epsilon
+        # mean, variance, logVariance = self.q_mean_var(data, t)
+        # XT = mean * data + variance.sqrt() * epsilon
         # Sample Images
-        return XT.float(), epsilon
+        # return XT.float(), epsilon
+
+        return (self.getExtract(self.Sqrd_Alpha_Cumprod, t, data.shape) * data
+                + self.getExtract(self.Sqrd_1_Minus_Alpha_Cumprod, t, data.shape) * epsilon).float(), epsilon
+
+    def pred_X0_from_XT(self, XT, t, epsilon):
+        XT_shape = XT.shape
+        return (self.getExtract(self.Sqrd_Recipricol_Alpha_Cumprod, t, XT_shape) * XT - self.getExtract(self.Sqrd_Recipricol_Alpha_Cumprod_Minus_1, t, XT_shape) * epsilon)
+
+    # compute predicted mean and variance of p(x_{t-1} | x_t)
+    def p_mean_variance(self, model, XT, t):
+        X0_prediction = self.pred_X0_from_XT(XT.float(), t, model(XT.float(), t))
+        model_mean, posterior_Variance, posterior_log_variance = self.q_posterior_mean_variance(X0_prediction, XT, t)
+        return model_mean, posterior_Variance, posterior_log_variance
 
     # Sampling
     @torch.no_grad()
-    def PSample(self, model, XT, t, tID):  # Getting Sample values at Time T for Processes Q & P
-        mean, _, logVar = self.PMeanVar(model, XT, t)
-        noise = torch.randn_like(XT)
+    def p_sample(self, model, XT, t, tID):  # Getting Sample values at Time T for Processes Q & P
+        model_mean, _, model_logVar = self.p_mean_variance(model, XT, t)
+        epsilon = torch.randn_like(XT)
+        # No noise at t == 0
         nonzeroMask = ((t != 0).float().view(-1, *([1] * (len(XT.shape) - 1))))
-        sample = mean + nonzeroMask * torch.exp(0.5 * logVar) * noise
+        sample = model_mean + nonzeroMask * torch.exp(0.5 * model_logVar) * epsilon
         return sample
 
     # Looped Sampling for Consistent Reverse Process
+    # Unused Method
     @torch.no_grad()
-    def Sample(self, model, img):  # Sampling
+    def sample(self, model, img):  # Sampling
         for count in range(self.t_steps):  # SAMPLING 2: for t = T, . . . , 1 do
             t = self.t_steps - count - 1
             # SAMPLING 3 & 4 See Backward PASS (Data = XT or X)
-            img = self.PSample(model, img, torch.full((self.batchSize,), t, device=device, dtype=torch.long), t)
+            img = self.p_sample(model, img, torch.full((self.batchSize,), t, device=device, dtype=torch.long), t)
         return img  # SAMPLING 6: return generated X_0 Data at End
 
     @torch.no_grad()
-    def plot2DSampleQuality(self, model, XT, dataIndex):
+    def plot_2D_gaussian(self, model, XT, dataIndex):
         plt.figure(figsize=(35,8))
         plt.title("Epoch: " + str(self.epochCounter))
         for count in range(0, self.steps)[::-1]:
-            XT = self.PSample(model, XT, torch.full((self.batchSize,), count, device=device, dtype=torch.long), count)
+            XT = self.p_sample(model, XT, torch.full((self.batchSize,), count, device=device, dtype=torch.long), count)
+            if count == 999:
+                self.plot_scatter(XT, count, 1000)  # t = 999 -> ~1000
             if count == 0 or count % self.imageSeries == 0:
-                plt.subplot(1, self.sampleCount, int(self.sampleCount - (count / self.imageSeries)))
-                plt.xlim(-750, 750)
-                plt.ylim(-750, 750)
-                plt.title("T " + str(count))
-                for i in range(0, self.batchSize):
-                    plt.scatter(np.round(float(XT[i][0][1].cpu()), 4), np.round(float(XT[i][0][0].cpu()), 4), c="b", linewidths=1)
+                self.plot_scatter(XT, count, count)
 
-        plt.savefig("Images/Sample Plot Series/E " + str(self.epochCounter) + " T " + str(dataIndex) + ".jpg")
+        plt.savefig("Images/Sample Plot Series/Gaussian/E " + str(self.epochCounter) + " T " + str(dataIndex) + ".jpg")
         plt.close()
 
-    def gradientDescent(self, model, idx, X0, t, MI):  # TRAINING 1: Data = 2: X_0 ∼ q(x_0)
-        XT, epsilon = self.QSample(X0, idx, t)
+    def plot_scatter(self, XT, count, title):
+        plt.subplot(1, self.sampleCount + 1, int(self.sampleCount + 1 - (count / self.imageSeries)))
+        plt.xlim(-1_000, 1_000)
+        plt.ylim(-1_000, 1_000)
+        plt.title("T " + str(title))
+        for i in range(0, self.batchSize):
+            plt.scatter((XT[i][:, 0].cpu()), (XT[i][:, 1].cpu()), c="b", linewidths=1)
+
+
+    def gradient_descent(self, model, idx, X0, t, MI):  # TRAINING 1: Data = 2: X_0 ∼ q(x_0)
+        XT, epsilon = self.q_sample(X0, idx, t)
         predictedNoise = model(XT, t)
 
         # MSE(Input, Target) | UNet(XT, t)
@@ -221,52 +242,53 @@ class Gaussian_DDPM:
         return loss, XT, epsilon, predictedNoise
 
 
-    def TrainingAndSampling(self, model, DataSet, MI):
+    def train_and_sample(self, model, dataset, MI):
         flag = False
         # MI in here somewhere
-        for idx, Data in enumerate(DataSet):  # TRAINING 1: Repeated Loop
+        for idx, data in enumerate(dataset):  # TRAINING 1: Repeated Loop
             self.optimizer.zero_grad()
 
             # TRAINING 3: t ∼ Uniform({1, . . . , T })
-            t = torch.randint(0, self.t_steps, (Data.shape[0],), device=device).long()
+            t = torch.randint(0, self.t_steps, (data.shape[0],), device=device).long()
             # TRAINING 2: X_0 ∼ q(x_0)
 
-            self.loss, XT, epsilon, predNoise = self.gradientDescent(model, idx, Data.to(device), t, MI)
+            self.loss, XT, epsilon, predNoise = self.gradient_descent(model, idx, data.to(device), t, MI)
 
-            if int(idx % (len(DataSet)/5)) == 0:
-                print(f"T: {idx:05d}/{len(DataSet)}:\tLoss: {self.loss.item()}")
+            if int(idx % (len(dataset)/5)) == 0:
+                print(f"T: {idx:05d}/{len(dataset)}:\tLoss: {self.loss.item()}")
 
             # Conduct intermittent sampling during training process to demonstrate progress
 
-            if (((self.epochCounter % (self.epochs/2) == 0) or (self.epochCounter == self.epochs-1)) and flag == False and (self.dimensionality == 2)):
+            if (((self.epochCounter % round(self.epochs * (1/5)) == 0) or (self.epochCounter == self.epochs)) and flag == False and (self.dimensionality == 2)):
                 #self.imgGenFromSamples(model, img, "Images/Generated Images/E " + str(self.epochCounter) + " T " + str(int(idx)) + ".jpg")
-                self.plot2DSampleQuality(model, XT, idx)  # Plot Sample Transformation over time
+                self.plot_2D_gaussian(model, XT, idx)  # Plot Sample Transformation over time
                 flag = True
 
             self.loss.backward()
             self.optimizer.step()
-        print(f"T: {int((self.sampleSize/self.batchSize)+1):05d}/{len(DataSet)}:\tLoss: {self.loss.item()}")
+        print(f"T: {int((self.sampleSize/self.batchSize)+1):05d}/{len(dataset)}:\tLoss: {self.loss.item()}")
 
     def run(self):
+
         # Get Data
-        Data = self.getDataset()
-        trainData = DataLoader(dataset=Data, batch_size=self.batchSize, shuffle=True, pin_memory=True)
+        data = self.getDataset()
+        normalized_data = (data - data.min())/(data.max() - data.min()) * 2 - 1  # Normalize between [-1, 1]
+        dataset = DataLoader(dataset=normalized_data, batch_size=self.batchSize, shuffle=True, pin_memory=True)
 
         # Get Models
         model = self.getModel()
-        MI = torch.load("DDPMModels/MINeuralEstimator.pt")
-
-        print("Start Time: " + str(datetime.datetime.now()) + "")
+        MI = torch.load("ddpm models/MINeuralEstimator.pt")
 
         # Train and Sample
-        while self.epochCounter != self.epochs:
+        print("Start Time: " + str(datetime.datetime.now()) + "")
+        while self.epochCounter != self.epochs+1:
             print(f"\n   ------------- Epoch {self.epochCounter} ------------- ")
-            self.TrainingAndSampling(model, trainData, MI)  # Sampling done intermittently during training
+            self.train_and_sample(model, dataset, MI)  # Sampling done intermittently during training
             self.epochCounter += 1
 
-        torch.save(model, "DDPMModels/GaussianDDPM.pt")
+        torch.save(model, f"ddpm models/{self.dimensionality}D_Gauss_ddpm_E{self.epochCounter - 1}_L{round(self.loss.item(), 5)}.pt")
 
-        print(f"\n   ------------- Epoch {self.epochCounter} ------------- ")
+        print(f"\n   ------------- Epoch {self.epochCounter - 1} ------------- ")
         print(f"\t  Final Loss: {self.loss.item()}\n")
 
         # System Information
@@ -276,19 +298,6 @@ class Gaussian_DDPM:
         print(f'Free memory:\t     {deviceID.memory_free_human()}')
 
         print("Completion Time: " + str(datetime.datetime.now()) + "")
-
-
-class Data(Dataset):
-    def __init__(self, X, y):
-        self.X = torch.from_numpy(X.astype(np.float32))
-        self.y = torch.from_numpy(y.astype(np.float32))
-        self.len = self.X.shape[0]
-
-    def __getitem__(self, index):
-        return self.X[index], self.y[index]
-
-    def __len__(self):
-        return self.len
 
 if __name__ == "__main__":
     main()

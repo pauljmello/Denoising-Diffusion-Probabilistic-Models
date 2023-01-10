@@ -97,23 +97,23 @@ class DDPM_Gaussian:
         self.imageSeries = int(self.t_steps / (self.sampleCount))
 
         self.Beta = self.getSchedule(schedule)  # Schedule
-        self.Sqrd_Sigma = self.Beta  # Sigma^2
+        self.Sqrd_Sigma = self.Beta  # Sigma Squared
         self.Alpha = 1.0 - self.Beta  # Alpha
 
-        self.Alpha_Cumprod = torch.cumprod(self.Alpha, dim=0)  # Product Value
-        self.Sqrd_Alpha_Cumprod = torch.sqrt(self.Alpha_Cumprod)
-        self.Alpha_Cumprod_Previous = F.pad(self.Alpha_Cumprod[:-1], (1, 0), value=1.0)
-        self.Sqrd_1_Minus_Alpha_Cumprod = torch.sqrt(1.0 - self.Alpha_Cumprod)
-        self.Log_one_minus_Alpha_Cumprod = torch.log(1.0 - self.Alpha_Cumprod)
+        self.Alpha_Cumprod = torch.cumprod(self.Alpha, dim=0)  # Product Value of Alpha
+        self.Sqrd_Alpha_Cumprod = torch.sqrt(self.Alpha_Cumprod)  # Square Root of Product Value of Alpha
+        self.Alpha_Cumprod_Previous = F.pad(self.Alpha_Cumprod[:-1], (1, 0), value=1.0)  # Previous Product Value of Alpha
+        self.Sqrd_1_Minus_Alpha_Cumprod = torch.sqrt(1.0 - self.Alpha_Cumprod)  # Square Root of 1 - Product Value of Alpha
+        self.Log_one_minus_Alpha_Cumprod = torch.log(1.0 - self.Alpha_Cumprod)  # Log of 1 - Product Value of Alpha
 
-        self.Sqrd_Recipricol_Alpha_Cumprod = torch.sqrt(1 / self.Alpha_Cumprod)
-        self.Sqrd_Recipricol_Alpha_Cumprod_Minus_1 = torch.sqrt(1 / self.Alpha_Cumprod-1)
+        self.Sqrd_Recipricol_Alpha_Cumprod = torch.sqrt(1 / self.Alpha_Cumprod)  # Square Root of Reciprocal of Product Value of Alpha
+        self.Sqrd_Recipricol_Alpha_Cumprod_Minus_1 = torch.sqrt(1 / self.Alpha_Cumprod-1)  # Square Root of Reciprocal of Product Value of Alpha - 1
 
         # q(x_{t - 1} | x_t, x_0)
-        self.Posterior_Variance = self.Beta * (1.0 - self.Alpha_Cumprod_Previous) / (1.0 - self.Alpha_Cumprod)
-        self.Posterior_Log_Clamp = np.log(np.maximum(self.Posterior_Variance, 1e-20))
-        self.Posterior1 = (self.Beta * torch.sqrt(self.Alpha_Cumprod_Previous) / (1.0 - self.Alpha_Cumprod))
-        self.Posterior2 = ((1.0 - self.Alpha_Cumprod_Previous) * torch.sqrt(self.Alpha) / (1.0 - self.Alpha_Cumprod))
+        self.Posterior_Variance = self.Beta * (1.0 - self.Alpha_Cumprod_Previous) / (1.0 - self.Alpha_Cumprod)  # Var(x_{t-1} | x_t, x_0)
+        self.Posterior_Log_Clamp = np.log(np.maximum(self.Posterior_Variance, 1e-20))  # Log of Var(x_{t-1} | x_t, x_0)
+        self.Posterior1 = (self.Beta * torch.sqrt(self.Alpha_Cumprod_Previous) / (1.0 - self.Alpha_Cumprod))  # 1 / (Var(x_{t-1} | x_t, x_0))
+        self.Posterior2 = ((1.0 - self.Alpha_Cumprod_Previous) * torch.sqrt(self.Alpha) / (1.0 - self.Alpha_Cumprod))  # (1 - Alpha_{t-1}) / (Var(x_{t-1} | x_t, x_0))
 
     def getSchedule(self, schedule):
         if schedule == "linear":
@@ -147,11 +147,11 @@ class DDPM_Gaussian:
 
     def getMultiGauss(self, mean, covariance):
         sampler = MultivariateNormal(mean, covariance)
-        return sampler.sample((self.sampleSize,))
+        return sampler.sample((self.sampleSize,)) # Sample from Multivariate Normal Distribution
 
     def getExtract(self, tensor: torch.Tensor, t: torch.Tensor, X):
         out = tensor.gather(-1, t.cpu()).float()
-        return out.reshape(t.shape[0], *((1,) * (len(X) - 1))).to(t.device)
+        return out.reshape(t.shape[0], *((1,) * (len(X) - 1))).to(t.device) # Reshape to match X
 
     def q_mean_var(self, X0, t):
         X0_shape = X0.shape
@@ -177,16 +177,16 @@ class DDPM_Gaussian:
         # return XT.float(), epsilon
 
         return (self.getExtract(self.Sqrd_Alpha_Cumprod, t, data.shape) * data
-                + self.getExtract(self.Sqrd_1_Minus_Alpha_Cumprod, t, data.shape) * epsilon).float(), epsilon
+                + self.getExtract(self.Sqrd_1_Minus_Alpha_Cumprod, t, data.shape) * epsilon).float(), epsilon # Sample Images
 
     def pred_X0_from_XT(self, XT, t, epsilon):
         XT_shape = XT.shape
-        return (self.getExtract(self.Sqrd_Recipricol_Alpha_Cumprod, t, XT_shape) * XT - self.getExtract(self.Sqrd_Recipricol_Alpha_Cumprod_Minus_1, t, XT_shape) * epsilon)
+        return (self.getExtract(self.Sqrd_Recipricol_Alpha_Cumprod, t, XT_shape) * XT - self.getExtract(self.Sqrd_Recipricol_Alpha_Cumprod_Minus_1, t, XT_shape) * epsilon) # Sample Images
 
     # compute predicted mean and variance of p(x_{t-1} | x_t)
     def p_mean_variance(self, model, XT, t):
-        X0_prediction = self.pred_X0_from_XT(XT.float(), t, model(XT.float(), t))
-        model_mean, posterior_Variance, posterior_log_variance = self.q_posterior_mean_variance(X0_prediction, XT, t)
+        X0_prediction = self.pred_X0_from_XT(XT.float(), t, model(XT.float(), t)) # p(x_{t-1} | x_t)
+        model_mean, posterior_Variance, posterior_log_variance = self.q_posterior_mean_variance(X0_prediction, XT, t) # q(x_{t-1} | x_t, x_0)
         return model_mean, posterior_Variance, posterior_log_variance
 
     # Sampling
@@ -195,18 +195,19 @@ class DDPM_Gaussian:
         model_mean, _, model_logVar = self.p_mean_variance(model, XT, t)
         epsilon = torch.randn_like(XT)
         # No noise at t == 0
-        nonzeroMask = ((t != 0).float().view(-1, *([1] * (len(XT.shape) - 1))))
-        sample = model_mean + nonzeroMask * torch.exp(0.5 * model_logVar) * epsilon
+        nonzeroMask = ((t != 0).float().view(-1, *([1] * (len(XT.shape) - 1)))) # Mask for t != 0
+        sample = model_mean + nonzeroMask * torch.exp(0.5 * model_logVar) * epsilon # Sample from P(Xt | X0)
         return sample
 
     # Looped Sampling for Consistent Reverse Process
     # Unused Method
+    # Sampling
     @torch.no_grad()
-    def sample(self, model, img):  # Sampling
+    def sample(self, model, img):
         for count in range(self.t_steps):  # SAMPLING 2: for t = T, . . . , 1 do
             t = self.t_steps - count - 1
             # SAMPLING 3 & 4 See Backward PASS (Data = XT or X)
-            img = self.p_sample(model, img, torch.full((self.batchSize,), t, device=device, dtype=torch.long), t)
+            img = self.p_sample(model, img, torch.full((self.batchSize,), t, device=device, dtype=torch.long), t) # Sample from P(Xt | X0)
         return img  # SAMPLING 6: return generated X_0 Data at End
 
     @torch.no_grad()
@@ -215,10 +216,10 @@ class DDPM_Gaussian:
         plt.title("Epoch: " + str(self.epochCounter))
         for count in range(0, self.steps)[::-1]:
             XT = self.p_sample(model, XT, torch.full((self.batchSize,), count, device=device, dtype=torch.long), count)
-            if count == 999:
-                self.plot_scatter(XT, count, 1000)  # t = 999 -> ~1000
             if count == 0 or count % self.imageSeries == 0:
                 self.plot_scatter(XT, count, count)
+            elif count == 999:
+                self.plot_scatter(XT, count, 1000)  # Plotting 1000th Image
 
         plt.savefig("Images/Sample Plot Series/Gaussian/E " + str(self.epochCounter) + " T " + str(dataIndex) + ".jpg")
         plt.close()
@@ -238,8 +239,8 @@ class DDPM_Gaussian:
 
         # MSE(Input, Target) | UNet(XT, t)
         # F.nll_loss only 3D supported, gets 4D
-        loss = F.mse_loss(XT, predictedNoise) # TRAINING 5: ∇θ ||  − _θ * (√ (̄α_t) * x_0 + √(1−α_t) * , t) || ^ 2
-        return loss, XT, epsilon, predictedNoise
+        loss = F.mse_loss(XT, predictedNoise) # TRAINING 2: Loss = MSE(XT, UNet(XT, t))
+        return loss, XT, epsilon, predictedNoise # TRAINING 3: Backpropagate Loss
 
 
     def train_and_sample(self, model, dataset, MI):
@@ -248,11 +249,8 @@ class DDPM_Gaussian:
         for idx, data in enumerate(dataset):  # TRAINING 1: Repeated Loop
             self.optimizer.zero_grad()
 
-            # TRAINING 3: t ∼ Uniform({1, . . . , T })
-            t = torch.randint(0, self.t_steps, (data.shape[0],), device=device).long()
-            # TRAINING 2: X_0 ∼ q(x_0)
-
-            self.loss, XT, epsilon, predNoise = self.gradient_descent(model, idx, data.to(device), t, MI)
+            t = torch.randint(0, self.t_steps, (data.shape[0],), device=device).long()  # TRAINING 3: t ∼ Uniform({1, . . . , T })
+            self.loss, XT, epsilon, predNoise = self.gradient_descent(model, idx, data.to(device), t, MI) # TRAINING 4: Loss = ||  − _θ * (√ (̄α_t) * x_0 + √(1−α_t) * , t) || ^ 2
 
             if int(idx % (len(dataset)/5)) == 0:
                 print(f"T: {idx:05d}/{len(dataset)}:\tLoss: {self.loss.item()}")
@@ -266,7 +264,7 @@ class DDPM_Gaussian:
 
             self.loss.backward()
             self.optimizer.step()
-        print(f"T: {int((self.sampleSize/self.batchSize)+1):05d}/{len(dataset)}:\tLoss: {self.loss.item()}")
+        print(f"T: {int((self.sampleSize/self.batchSize)+1):05d}/{len(dataset)}:\tLoss: {self.loss.item()}") # Print final loss
 
     def run(self):
 
@@ -286,7 +284,7 @@ class DDPM_Gaussian:
             self.train_and_sample(model, dataset, MI)  # Sampling done intermittently during training
             self.epochCounter += 1
 
-        torch.save(model, f"ddpm models/{self.dimensionality}D_Gauss_ddpm_E{self.epochCounter - 1}_L{round(self.loss.item(), 5)}.pt")
+        torch.save(model, f"ddpm models/{self.dimensionality}D_Gauss_ddpm_E{self.epochCounter - 1}_L{round(self.loss.item(), 5)}.pt") # Save Model
 
         print(f"\n   ------------- Epoch {self.epochCounter - 1} ------------- ")
         print(f"\t  Final Loss: {self.loss.item()}\n")

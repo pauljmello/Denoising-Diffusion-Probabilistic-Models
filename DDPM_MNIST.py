@@ -37,7 +37,7 @@ print("Device: " + str(device))
 
 # Set Seed for Reproducibility
 
-SEED = 1001
+SEED = 3407  # https://arxiv.org/abs/2109.08203
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 

@@ -11,7 +11,7 @@ Below we demonstrate the forward diffusion process which sequentially adds noise
 ![Forward Diffusion t=0 (image) -> t=1000 (noise)](Images/Example%20Gradual%20Corruption.jpg)
 
 Below we demonstrate the reverse diffusion process which sequentially removes noise from an image, leading to a gradual restoration.
-![Backward Diffusion t=1000 (noise) -> t=0 (image)](Images/Sample Plot Series/mnist/E 8 T 0.jpg)
+![Backward Diffusion t=1000 (noise) -> t=0 (image)](Images/Sample%20Plot%20Series/mnist/E%208%20T%200.jpg)
 
 ## Requirements
 Download the requiremenets.txt file which contains the required packages including:
